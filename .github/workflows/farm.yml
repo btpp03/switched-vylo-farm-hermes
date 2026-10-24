@@ -15,9 +15,9 @@ on:
         default: "25"
         required: true
       spend:
-        description: "spend all tokens as runtime afterwards"
+        description: "spend all tokens as runtime afterwards (默认不换，token 留在余额里)"
         type: boolean
-        default: true
+        default: false
       proxy:
         description: "override proxy URL (empty = use PROXY secret or local sing-box)"
         default: ""

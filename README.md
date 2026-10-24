@@ -57,8 +57,11 @@ Cookie 来源二选一：
 | `PROXY` | 住宅代理 URL，如 `socks5://user:pass@host:port` |
 | `SB_CONFIG` | *`PROXY` 的替代方案*：一份 sing-box 配置，其本地 socks 入口监听 10801‑10808（job 自己拉起 sing-box，并用 `socks5://127.0.0.1:10807`） |
 
-输入参数：`count`（默认 25，即每日上限）、`spend`（默认 true，跑完直接把 token 换成时长）、
+输入参数：`count`（默认 25，即每日上限）、`spend`（默认 **false**：只刷 token 留在余额里，需要时才手动勾选换时长）、
 `proxy`（临时覆盖代理）。
+
+> 说明：Cloud Token 只是余额，不会自动转成时长；`add_runtime.py` 是**手动**才跑的，
+> 工作流默认不调用它。
 
 ## 文件说明
 
