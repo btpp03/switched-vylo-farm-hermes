@@ -75,10 +75,22 @@ jobs:
           SECRET_PROXY: ${{ secrets.PROXY }}
           COUNT: ${{ github.event.inputs.count }}
         run: |
+          set -o pipefail
           export SW_PROXY="${INPUT_PROXY:-${SECRET_PROXY:-socks5://127.0.0.1:10807}}"
           echo "proxy: ${SW_PROXY%%@*}"
-          xvfb-run -a python3 -u vylo_farm.py --count "$COUNT" 2>&1 | tee farm.log
-          echo "---- summary ----"; grep SUMMARY farm.log || true
+          xvfb-run -a -s "-screen 0 1400x1000x24" python3 -u vylo_farm.py --count "$COUNT" 2>&1 | tee farm.log
+          grep SUMMARY farm.log || true
+
+      - name: Upload logs on failure
+        if: ${{ failure() || cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: farm-debug
+          path: |
+            farm.log
+            sb.log
+            /tmp/vylo_turnstile_fail_*.png
+          if-no-files-found: ignore
 
       - name: Spend tokens as runtime
         if: ${{ github.event.inputs.spend == 'true' }}

@@ -157,6 +157,16 @@ def earn_one(ctx, page, log):
             break
     log(f"turnstile: {'solved' if solved else 'FAILED'}")
     if not solved:
+        try:
+            page.screenshot(path=f"/tmp/vylo_turnstile_fail_{int(time.time())}.png", full_page=True)
+            log(f"  url at fail: {page.url}")
+            log(f"  text at fail: {body(page)[:160]}")
+            r = page.evaluate("""() => {const e=document.querySelector('.cf-turnstile,[data-sitekey]');
+                if(!e) return null; const b=e.getBoundingClientRect();
+                return {x:b.x,y:b.y,w:b.width,h:b.height,vis:getComputedStyle(e).visibility};}""")
+            log(f"  widget rect: {r} viewport={page.viewport_size}")
+        except Exception as e:
+            log(f"  diag failed: {type(e).__name__}")
         return False
 
     # walk the steps until it sends us back to the panel
