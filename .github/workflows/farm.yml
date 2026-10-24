@@ -1,7 +1,12 @@
 name: farm-cloud-tokens
 
-# Manual trigger only. Farms switched.cloud Cloud Tokens through the Vylo route and
-# (optionally) immediately spends them as extra VPS runtime.
+# Manual trigger only: farms switched.cloud Cloud Tokens through the Vylo route and
+# optionally spends the whole balance as VPS runtime.
+#
+# vylo.cc refuses datacenter IPs, so a residential exit is required. Two ways:
+#   * secret PROXY        -> socks5://host:port or http://host:port (ready-made proxy)
+#   * secret SB_CONFIG    -> a sing-box config with local socks inbounds (10801-10808);
+#                            the job starts sing-box itself and uses socks5://127.0.0.1:10807
 on:
   workflow_dispatch:
     inputs:
@@ -14,7 +19,7 @@ on:
         type: boolean
         default: true
       proxy:
-        description: "residential SOCKS5/HTTP proxy, e.g. socks5://1.2.3.4:1080 (leave empty to use the PROXY secret)"
+        description: "override proxy URL (empty = use PROXY secret or local sing-box)"
         default: ""
         required: false
 
@@ -36,24 +41,51 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install deps
+      - name: Start residential exit (only if SB_CONFIG secret is set)
+        env:
+          SB_CONFIG: ${{ secrets.SB_CONFIG }}
+        run: |
+          if [ -z "$SB_CONFIG" ]; then
+            echo "no SB_CONFIG secret - skipping local sing-box"
+            exit 0
+          fi
+          VER=1.14.1
+          curl -sSLo sb.tgz "https://github.com/SagerNet/sing-box/releases/download/v${VER}/sing-box-${VER}-linux-amd64.tar.gz"
+          tar xzf sb.tgz
+          cp "sing-box-${VER}-linux-amd64/sing-box" ./sing-box
+          printf '%s' "$SB_CONFIG" > sb.json
+          nohup ./sing-box run -c sb.json > sb.log 2>&1 &
+          for i in $(seq 25); do
+            ip=$(curl -s -m 6 --socks5-hostname 127.0.0.1:10807 https://api.ipify.org || true)
+            if [ -n "$ip" ]; then echo "residential exit ip: $ip"; break; fi
+            sleep 3
+          done
+          tail -3 sb.log || true
+
+      - name: Install playwright
         run: |
           python -m pip install -q --upgrade pip
-          pip install -q playwright
+          pip install -q -r requirements.txt
           python -m playwright install --with-deps chromium
 
       - name: Farm
         env:
           NOPROFIT_COOKIES: ${{ secrets.NOPROFIT_COOKIES }}
-          SW_PROXY: ${{ github.event.inputs.proxy || secrets.PROXY }}
+          INPUT_PROXY: ${{ github.event.inputs.proxy }}
+          SECRET_PROXY: ${{ secrets.PROXY }}
           COUNT: ${{ github.event.inputs.count }}
         run: |
-          echo "exit-ip: $(curl -s -m 15 ${SW_PROXY:+--proxy $SW_PROXY} https://api.ipify.org || echo unknown)"
-          xvfb-run -a python3 -u vylo_farm.py --count "$COUNT"
+          export SW_PROXY="${INPUT_PROXY:-${SECRET_PROXY:-socks5://127.0.0.1:10807}}"
+          echo "proxy: ${SW_PROXY%%@*}"
+          xvfb-run -a python3 -u vylo_farm.py --count "$COUNT" 2>&1 | tee farm.log
+          echo "---- summary ----"; grep SUMMARY farm.log || true
 
       - name: Spend tokens as runtime
         if: ${{ github.event.inputs.spend == 'true' }}
         env:
           NOPROFIT_COOKIES: ${{ secrets.NOPROFIT_COOKIES }}
-          SW_PROXY: ${{ github.event.inputs.proxy || secrets.PROXY }}
-        run: xvfb-run -a python3 -u add_runtime.py
+          INPUT_PROXY: ${{ github.event.inputs.proxy }}
+          SECRET_PROXY: ${{ secrets.PROXY }}
+        run: |
+          export SW_PROXY="${INPUT_PROXY:-${SECRET_PROXY:-socks5://127.0.0.1:10807}}"
+          xvfb-run -a python3 -u add_runtime.py --tokens 0

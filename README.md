@@ -57,6 +57,7 @@ Grab them once from a logged-in browser (DevTools → Application → Cookies �
 | --- | --- |
 | `NOPROFIT_COOKIES` | panel cookie JSON (raw or base64) |
 | `PROXY` | residential proxy URL, e.g. `socks5://user:pass@host:port` |
+| `SB_CONFIG` | *alternative to `PROXY`*: a sing-box config whose local socks inbounds listen on 10801‑10808 (the job boots sing-box itself and uses `socks5://127.0.0.1:10807`) |
 
 Inputs: `count` (default 25 = the daily cap), `spend` (default true), `proxy` (override).
 
