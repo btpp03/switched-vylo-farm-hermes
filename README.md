@@ -1,76 +1,75 @@
-# switched.cloud Cloud-Token farmer (Vylo route)
+# switched.cloud 云令牌刷取工具（Vylo 线路）
 
-Automates the "Earn with Vylo" sponsored-link flow on `panel.switched.cloud`, then
-spends the farmed **Cloud Tokens** as extra VPS runtime (1 token = 1 day).
+自动跑 `panel.switched.cloud` 面板上的 **Earn with Vylo** 赞助链接流程，把刷到的
+**Cloud Token** 换成 VPS 运行时长（1 token = 1 天）。
 
-Verified live on 2026-10-23: 25/25 tokens in one run, ~90 s per token, balance
-`50 cloud tokens` → runtime `2d 22h` → `52d 22h`.
+2026-10-23 实机验证：一次跑满 25/25，单条约 90 秒；余额 `50 cloud tokens` → 时长
+`2d 22h` → `52d 22h`。
 
-## Why it needs a residential exit
+## 为什么必须走住宅出口
 
-Both the panel and `vylo.cc` refuse datacenter IPs:
+面板和 `vylo.cc` 都会拒绝机房 IP：
 
 ```
 Turn off your VPN or proxy — Vylo links can't be opened through a VPN, proxy, Tor or a server network.
 ```
 
-GitHub-hosted runners are datacenter IPs, so a residential proxy is mandatory for the
-Actions route (secret `PROXY`, e.g. `socks5://host:port`). Direct/DC runs simply return
-`no vylo link`.
+GitHub 托管 runner 本身就是机房 IP，所以 Actions 路线必须挂住宅代理（secret `PROXY`，
+形如 `socks5://host:port`）。直连或裸跑只有一句 `no vylo link`。
 
-## Why the Turnstile click is weird
+## Turnstile 为什么点得这么怪
 
-The widget is rendered inside a **closed shadow root**: `page.locator()` and
-`querySelector()` cannot reach it, and there is no `cf-turnstile-response` node to read
-until it is solved. The `.cf-turnstile` *container* still has a real bounding box, so the
-script reads that box and dispatches **real CDP mouse events** (`Input.dispatchMouseEvent`)
-at it — that consistently yields a ~773-char token.
+验证码挂在 **closed shadow root** 里：`page.locator()`、`querySelector()` 都摸不到，
+解出来之前页面上也没有 `cf-turnstile-response` 节点可读。但 `.cf-turnstile` **容器**
+有真实坐标，所以脚本读容器 bounding box，再用 **CDP 真实鼠标事件**
+（`Input.dispatchMouseEvent`）点上去 —— 稳定拿到约 773 字符的 token。
 
-After the captcha the page is a small state machine:
-`Continue → countdown (/wait?t=…) → Unlock → Continue → countdown → Unlock → Get link`,
-which redirects back to the panel where Vylo's postback credits the token.
+过验证码之后是个小状态机：
+`Continue → 倒计时（/wait?t=…）→ Unlock → Continue → 倒计时 → Unlock → Get link`
+最后跳回面板，Vylo 的回调到账，加 1 个 token。
 
-## Usage
+## 本机用法
 
-Local (headed browser under xvfb — the configuration that actually passes Turnstile):
+用 xvfb 跑「有头」浏览器，这是实测能过 Turnstile 的配置：
 
 ```bash
 pip install playwright && python -m playwright install chromium
-export SW_PROXY=socks5://127.0.0.1:10807        # residential exit
-python3 -u vylo_farm.py --count 25              # farm
-python3 -u add_runtime.py                       # spend every token as runtime
+export SW_PROXY=socks5://127.0.0.1:10807        # 住宅出口
+python3 -u vylo_farm.py --count 25              # 刷 token
+python3 -u add_runtime.py                       # 把余额全部换成运行时长
 ```
 
-Cookies come from either:
+Cookie 来源二选一：
 
-* `NOPROFIT_COOKIES` — the panel cookie JSON itself, raw or base64 (used in CI), or
-* `NOPROFIT_COOKIE_FILE` — path to the cookie JSON (default `~/noprofit_cookies.json`).
+* `NOPROFIT_COOKIES` —— 面板 cookie 的 JSON 本体，raw 或 base64（CI 用这个），或
+* `NOPROFIT_COOKIE_FILE` —— cookie JSON 的路径（默认 `~/noprofit_cookies.json`）
 
-Grab them once from a logged-in browser (DevTools → Application → Cookies →
-`panel.switched.cloud`), export as a JSON array of `{name, value, domain, ...}`.
+获取方式：在已登录的浏览器里 DevTools → Application → Cookies → `panel.switched.cloud`，
+导出为 `[{name, value, domain, ...}, ...]` 的 JSON 数组。
 
 ## GitHub Actions
 
-`.github/workflows/farm.yml` is `workflow_dispatch` only. Secrets needed:
+`.github/workflows/farm.yml` 只支持手动触发（`workflow_dispatch`）。需要的 secrets：
 
-| secret | content |
+| secret | 内容 |
 | --- | --- |
-| `NOPROFIT_COOKIES` | panel cookie JSON (raw or base64) |
-| `PROXY` | residential proxy URL, e.g. `socks5://user:pass@host:port` |
-| `SB_CONFIG` | *alternative to `PROXY`*: a sing-box config whose local socks inbounds listen on 10801‑10808 (the job boots sing-box itself and uses `socks5://127.0.0.1:10807`) |
+| `NOPROFIT_COOKIES` | 面板 cookie JSON（raw 或 base64） |
+| `PROXY` | 住宅代理 URL，如 `socks5://user:pass@host:port` |
+| `SB_CONFIG` | *`PROXY` 的替代方案*：一份 sing-box 配置，其本地 socks 入口监听 10801‑10808（job 自己拉起 sing-box，并用 `socks5://127.0.0.1:10807`） |
 
-Inputs: `count` (default 25 = the daily cap), `spend` (default true), `proxy` (override).
+输入参数：`count`（默认 25，即每日上限）、`spend`（默认 true，跑完直接把 token 换成时长）、
+`proxy`（临时覆盖代理）。
 
-## Files
+## 文件说明
 
-* `vylo_farm.py` — the farmer (`--count`, `--proxy`, `--max-fail`, `--headless`)
-* `add_runtime.py` — spends the balance via the "Add runtime" modal (`--tokens`, `--dry-run`)
-* `panelcookies.py` — cookie loading/saving shared by both
+* `vylo_farm.py` —— 刷 token 主脚本（`--count`、`--proxy`、`--max-fail`、`--headless`）
+* `add_runtime.py` —— 通过 "Add runtime" 弹窗把余额换成时长（`--tokens`、`--dry-run`）
+* `panelcookies.py` —— 两个脚本共用的 cookie 读取/落盘
 
-## Notes / limits
+## 已知限制
 
-* 25 tokens per day per site; the counter resets at the panel's local midnight.
-* `--headless` exists, but headed-under-xvfb is what has been tested against Turnstile.
-* Runtime is a pure countdown: it drains whether or not the VPS is doing anything, and an
-  expired VPS is deleted after a short grace window, so spend tokens before the deadline.
-* This is a personal automation of a reward program's own UI; use it with your own account.
+* 每个站每天 25 个 token，计数按面板本地时间的午夜重置。
+* 脚本里有 `--headless`，但实测能过 Turnstile 的是 xvfb 下的「有头」模式。
+* 时长是纯倒计时：VPS 什么都不干也在掉，过期后过一小段宽限期就删机，所以要在到期前把
+  token 换成时长。
+* 这是针对某个奖励计划自身界面的个人自动化，请只用自己的账号跑。
