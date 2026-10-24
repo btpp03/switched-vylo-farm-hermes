@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+noprofit_cookies.json
+cookies*.json
+*.log
+.env

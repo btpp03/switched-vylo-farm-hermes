@@ -1,0 +1,59 @@
+name: farm-cloud-tokens
+
+# Manual trigger only. Farms switched.cloud Cloud Tokens through the Vylo route and
+# (optionally) immediately spends them as extra VPS runtime.
+on:
+  workflow_dispatch:
+    inputs:
+      count:
+        description: "how many tokens to farm (daily cap is 25)"
+        default: "25"
+        required: true
+      spend:
+        description: "spend all tokens as runtime afterwards"
+        type: boolean
+        default: true
+      proxy:
+        description: "residential SOCKS5/HTTP proxy, e.g. socks5://1.2.3.4:1080 (leave empty to use the PROXY secret)"
+        default: ""
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: farm-cloud-tokens
+  cancel-in-progress: false
+
+jobs:
+  farm:
+    timeout-minutes: 90
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install -q --upgrade pip
+          pip install -q playwright
+          python -m playwright install --with-deps chromium
+
+      - name: Farm
+        env:
+          NOPROFIT_COOKIES: ${{ secrets.NOPROFIT_COOKIES }}
+          SW_PROXY: ${{ github.event.inputs.proxy || secrets.PROXY }}
+          COUNT: ${{ github.event.inputs.count }}
+        run: |
+          echo "exit-ip: $(curl -s -m 15 ${SW_PROXY:+--proxy $SW_PROXY} https://api.ipify.org || echo unknown)"
+          xvfb-run -a python3 -u vylo_farm.py --count "$COUNT"
+
+      - name: Spend tokens as runtime
+        if: ${{ github.event.inputs.spend == 'true' }}
+        env:
+          NOPROFIT_COOKIES: ${{ secrets.NOPROFIT_COOKIES }}
+          SW_PROXY: ${{ github.event.inputs.proxy || secrets.PROXY }}
+        run: xvfb-run -a python3 -u add_runtime.py
