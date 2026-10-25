@@ -198,6 +198,19 @@ def earn_one(ctx, page, log):
     return ok
 
 
+def proxy_cfg(url):
+    """socks5://user:pass@host:port -> Playwright proxy dict with credentials."""
+    if not url:
+        return None
+    from urllib.parse import urlparse, unquote
+    u = urlparse(url)
+    cfg = {"server": f"{u.scheme}://{u.hostname}:{u.port}"}
+    if u.username:
+        cfg["username"] = unquote(u.username)
+        cfg["password"] = unquote(u.password or "")
+    return cfg
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--count", type=int, default=25, help="how many tokens to farm")
@@ -218,7 +231,7 @@ def main():
                                                       "--disable-blink-features=AutomationControlled",
                                                       "--disable-dev-shm-usage"])
         ctx = br.new_context(viewport={"width": 1366, "height": 900}, locale="en-US",
-                             proxy={"server": args.proxy} if args.proxy else None)
+                             proxy=proxy_cfg(args.proxy))
         ctx.add_cookies(cookies)
         page = ctx.new_page()
         try:

@@ -41,6 +41,27 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Start upstream socks relay (JP_SOCKS_URL secret -> local 10900)
+        env:
+          JP_SOCKS_URL: ${{ secrets.JP_SOCKS_URL }}
+        run: |
+          if [ -z "$JP_SOCKS_URL" ]; then
+            echo "no JP_SOCKS_URL secret - skipping relay"
+            exit 0
+          fi
+          VER=1.14.1
+          curl -sSLo sb.tgz "https://github.com/SagerNet/sing-box/releases/download/v${VER}/sing-box-${VER}-linux-amd64.tar.gz"
+          tar xzf sb.tgz
+          cp "sing-box-${VER}-linux-amd64/sing-box" ./sing-box
+          python scripts/make_relay.py "$JP_SOCKS_URL" relay.json
+          nohup ./sing-box run -c relay.json > sb.log 2>&1 &
+          for i in $(seq 25); do
+            ip=$(curl -s -m 6 --socks5-hostname 127.0.0.1:10900 https://api.ipify.org || true)
+            if [ -n "$ip" ]; then echo "relay exit ip: $ip"; break; fi
+            sleep 3
+          done
+          tail -3 sb.log || true
+
       - name: Start residential exit (only if SB_CONFIG secret is set)
         env:
           SB_CONFIG: ${{ secrets.SB_CONFIG }}
@@ -76,7 +97,7 @@ jobs:
           COUNT: ${{ github.event.inputs.count }}
         run: |
           set -o pipefail
-          export SW_PROXY="${INPUT_PROXY:-${SECRET_PROXY:-socks5://127.0.0.1:10807}}"
+          export SW_PROXY="${INPUT_PROXY:-${SECRET_PROXY:-socks5://127.0.0.1:10900}}"
           echo "proxy: ${SW_PROXY%%@*}"
           xvfb-run -a -s "-screen 0 1400x1000x24" python3 -u vylo_farm.py --count "$COUNT" 2>&1 | tee farm.log
           grep SUMMARY farm.log || true
