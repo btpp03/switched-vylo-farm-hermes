@@ -141,6 +141,13 @@ def earn_one(ctx, page, log):
     time.sleep(5)
 
     cdp = ctx.new_cdp_session(page)
+    # CI runners have no window manager, so the page is never "focused" and Cloudflare
+    # ignores synthetic clicks. Force the focus flag before touching the widget.
+    try:
+        cdp.send("Emulation.setFocusEmulationEnabled", {"enabled": True})
+    except Exception as e:
+        log(f"  focus emulation failed: {type(e).__name__}")
+    log(f"  hasFocus={page.evaluate('document.hasFocus()')}")
     solved = False
     for _ in range(6):
         r = page.evaluate("""() => {const e=document.querySelector('.cf-turnstile,[data-sitekey]');
