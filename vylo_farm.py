@@ -147,11 +147,16 @@ def earn_one(ctx, page, log):
             if(!e) return null; const b=e.getBoundingClientRect();
             return {x:b.x,y:b.y,w:b.width,h:b.height};}""")
         if r and r["w"] > 5:
+            log(f"  widget rect: {r} vp={page.viewport_size}")
             click_at(cdp, r["x"] + 28, r["y"] + r["h"] / 2)
-        for _ in range(8):
+        else:
+            log(f"  widget not rendered yet: {r} vp={page.viewport_size}")
+        for k in range(8):
             time.sleep(2)
-            if toklen(page) > 10:
+            n = toklen(page)
+            if n > 10:
                 solved = True
+                log(f"  token len {n} after {k * 2}s")
                 break
         if solved:
             break
