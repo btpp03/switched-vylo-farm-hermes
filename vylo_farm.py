@@ -148,15 +148,33 @@ def earn_one(ctx, page, log):
             return {x:b.x,y:b.y,w:b.width,h:b.height};}""")
         if r and r["w"] > 5:
             log(f"  widget rect: {r} vp={page.viewport_size}")
-            click_at(cdp, r["x"] + 28, r["y"] + r["h"] / 2)
+            for frac in (0.09, 0.5, 0.75):
+                x = r["x"] + r["w"] * frac
+                y = r["y"] + r["h"] / 2
+                top = page.evaluate(
+                    "([x,y]) => {const e=document.elementFromPoint(x,y);"
+                    " return e ? (e.tagName + '.' + String(e.className).slice(0,50)) : 'none';}", [x, y])
+                log(f"  click {x:.0f},{y:.0f} top={top}")
+                click_at(cdp, x, y)
+                for k in range(6):
+                    time.sleep(2)
+                    n = toklen(page)
+                    if n > 10:
+                        solved = True
+                        log(f"  token len {n} after {k * 2}s at frac={frac}")
+                        break
+                if solved:
+                    break
         else:
             log(f"  widget not rendered yet: {r} vp={page.viewport_size}")
-        for k in range(8):
+        for k in range(4):
+            if solved:
+                break
             time.sleep(2)
             n = toklen(page)
             if n > 10:
                 solved = True
-                log(f"  token len {n} after {k * 2}s")
+                log(f"  token len {n} (late)")
                 break
         if solved:
             break
