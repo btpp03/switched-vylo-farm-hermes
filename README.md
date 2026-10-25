@@ -6,6 +6,10 @@
 2026-10-23 实机验证：一次跑满 25/25，单条约 90 秒；余额 `50 cloud tokens` → 时长
 `2d 22h` → `52d 22h`。
 
+> **只想照做、不想读代码**：看 [FRIEND.md](FRIEND.md)，从 fork 到跑通的 7 步图文说明，
+> 含 cookie 怎么取、住宅代理怎么选、`SB_CONFIG` 的 socks / http / ss / vmess / trojan /
+> vless / Reality 全套模板。
+
 ## 为什么必须走住宅出口
 
 面板和 `vylo.cc` 都会拒绝机房 IP：
