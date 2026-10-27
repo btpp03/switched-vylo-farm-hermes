@@ -1,0 +1,75 @@
+name: turnstile-probe
+
+# Diagnostic only. Opens a Turnstile page (an already-used vylo link by default, so it
+# burns no daily quota) inside the CI runner and prints the env + click diagnostics.
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: "Turnstile page to open"
+        default: "https://vylo.cc/z4dwU1"
+        required: true
+      proxy:
+        description: "override socks proxy (empty = JP relay from JP_SOCKS_URL)"
+        default: ""
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    timeout-minutes: 20
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Start upstream socks relay (JP_SOCKS_URL -> local 10900)
+        env:
+          JP_SOCKS_URL: ${{ secrets.JP_SOCKS_URL }}
+        run: |
+          if [ -z "$JP_SOCKS_URL" ]; then echo "no JP_SOCKS_URL secret"; exit 0; fi
+          VER=1.14.1
+          curl -sSLo sb.tgz "https://github.com/SagerNet/sing-box/releases/download/v${VER}/sing-box-${VER}-linux-amd64.tar.gz"
+          tar xzf sb.tgz
+          cp "sing-box-${VER}-linux-amd64/sing-box" ./sing-box
+          python scripts/make_relay.py "$JP_SOCKS_URL" relay.json
+          nohup ./sing-box run -c relay.json > sb.log 2>&1 &
+          for i in $(seq 25); do
+            ip=$(curl -s -m 6 --socks5-hostname 127.0.0.1:10900 https://api.ipify.org || true)
+            if [ -n "$ip" ]; then echo "relay exit ip: $ip"; break; fi
+            sleep 3
+          done
+          tail -3 sb.log || true
+
+      - name: Install playwright
+        run: |
+          python -m pip install -q --upgrade pip
+          pip install -q -r requirements.txt
+          python -m playwright install --with-deps chromium
+
+      - name: Probe
+        env:
+          INPUT_PROXY: ${{ github.event.inputs.proxy }}
+          INPUT_URL: ${{ github.event.inputs.url }}
+          SECRET_PROXY: ${{ secrets.PROXY }}
+        run: |
+          export SW_PROXY="${INPUT_PROXY:-${SECRET_PROXY:-socks5://127.0.0.1:10900}}"
+          echo "proxy: ${SW_PROXY%%@*}"
+          xvfb-run -a -s "-screen 0 1400x1000x24" python3 -u turnstile_probe.py \
+            --url "$INPUT_URL" --proxy "$SW_PROXY" 2>&1 | tee probe.log
+
+      - name: Upload probe artifacts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: turnstile-probe
+          path: |
+            probe.log
+            sb.log
+            /tmp/turnstile_probe_*.png
+          if-no-files-found: ignore
