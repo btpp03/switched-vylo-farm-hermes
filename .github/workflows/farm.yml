@@ -41,19 +41,21 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Start upstream socks relay (JP_SOCKS_URL secret -> local 10900)
+      - name: Start upstream relay (HOME_VLESS_URL or JP_SOCKS_URL -> local 10900)
         env:
+          HOME_VLESS_URL: ${{ secrets.HOME_VLESS_URL }}
           JP_SOCKS_URL: ${{ secrets.JP_SOCKS_URL }}
         run: |
-          if [ -z "$JP_SOCKS_URL" ]; then
-            echo "no JP_SOCKS_URL secret - skipping relay"
+          RELAY_URL="${HOME_VLESS_URL:-$JP_SOCKS_URL}"
+          if [ -z "$RELAY_URL" ]; then
+            echo "no relay secret - skipping relay"
             exit 0
           fi
           VER=1.14.1
           curl -sSLo sb.tgz "https://github.com/SagerNet/sing-box/releases/download/v${VER}/sing-box-${VER}-linux-amd64.tar.gz"
           tar xzf sb.tgz
           cp "sing-box-${VER}-linux-amd64/sing-box" ./sing-box
-          python scripts/make_relay.py "$JP_SOCKS_URL" relay.json
+          python scripts/make_relay.py "$RELAY_URL" relay.json
           nohup ./sing-box run -c relay.json > sb.log 2>&1 &
           for i in $(seq 25); do
             ip=$(curl -s -m 6 --socks5-hostname 127.0.0.1:10900 https://api.ipify.org || true)

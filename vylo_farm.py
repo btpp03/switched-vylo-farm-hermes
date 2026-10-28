@@ -1,19 +1,22 @@
 #!/usr/bin/env python3
-"""switched.cloud Cloud-Token farmer (Vylo route).
+"""Farm switched.cloud Cloud Tokens through the Vylo sponsored link, in CI or locally.
 
-Flow per token (all verified working, 2026-10-23):
-  1. open panel.switched.cloud/tokens with the saved session cookies (residential exit)
-  2. click "Earn with Vylo"  -> the panel asks Vylo for a fresh one-time link
-     (the link shows up as a network request to https://vylo.cc/<code>)
-  3. open that link top-level, because the Turnstile widget is rendered inside a
-     closed shadow root: no locator / querySelector can reach it. The `.cf-turnstile`
-     container's bounding box is exact though, so we dispatch REAL CDP mouse events there.
+Flow (all inside one browser context):
+  1. open https://panel.switched.cloud/tokens with the stored session cookies
+  2. click "Earn with Vylo"      -> the panel asks Vylo for a fresh one-time link
+  3. follow that vylo.cc link    -> Turnstile checkbox sits in a closed shadow root, so the
+     only reliable way to click it is by coordinates taken from the `.cf-turnstile`
+     container rect (28px in from the left edge, vertically centred)
   4. walk the Vylo steps: Continue -> timer -> Unlock -> Continue -> timer -> Unlock -> Get link
-  5. it redirects back to the panel and Vylo's postback credits 1 Cloud Token (= 1 day runtime)
+  5. it redirects back to the panel and Vylo's postback credits 1 Cloud Token (= 2 days on a
+     Plus account; the panel counter counts *links*, not tokens)
 
-Usage:
-  SW_PROXY=socks5://127.0.0.1:10807 python3 vylo_farm.py --count 25
-  python3 vylo_farm.py --count 3 --proxy socks5://127.0.0.1:10807
+Nothing here spends tokens — "Add runtime" is a separate script (add_runtime.py).
+
+usage:
+  SW_PROXY=socks5://127.0.0.1:10804 xvfb-run -a python3 vylo_farm.py --count 25
+env:
+  NOPROFIT_COOKIES   base64 or raw JSON cookie list (CI); else ~/noprofit_cookies.json
 """
 import argparse
 import json
@@ -26,7 +29,7 @@ from playwright.sync_api import sync_playwright
 
 from panelcookies import load_cookies, save_cookies
 
-PANEL = "https://panel.switched.cloud/tokens"
+PANEL = os.environ.get("SW_PANEL", "https://panel.switched.cloud/tokens")
 
 CLICK_JS = r"""
 (txt) => {
@@ -46,6 +49,7 @@ CLICK_JS = r"""
 }
 """
 
+# step machine: buttons only, exact-ish text, so the "3 Get link" breadcrumb is never hit
 CLICK_BTN_JS = r"""
 (txt) => {
   const want = txt.toLowerCase().trim();
@@ -55,12 +59,31 @@ CLICK_BTN_JS = r"""
     const t = (e.innerText || '').trim().replace(/\s+/g, ' ').toLowerCase();
     if (t === want || (t.length <= 25 && t.includes(want))) {
       e.scrollIntoView({block: 'center'}); e.click();
-      return (e.innerText || '').trim().replace(/\s+/g, ' ');
+      return (e.innerText || '').trim().replace(/\s+/g, ' ').slice(0, 40);
     }
   }
   return null;
 }
 """
+
+RECT_JS = r"""() => {const e=document.querySelector('.cf-turnstile,[data-sitekey]');
+    if(!e) return null; const b=e.getBoundingClientRect();
+    return {x:b.x,y:b.y,w:b.width,h:b.height};}"""
+
+HIT_JS = """([x,y]) => {const e=document.elementFromPoint(x,y);
+    return e ? (e.tagName + '.' + String(e.className).slice(0,40)) : 'none';}"""
+
+
+def proxy_cfg(url):
+    if not url:
+        return None
+    from urllib.parse import urlparse, unquote
+    u = urlparse(url)
+    cfg = {"server": f"{u.scheme}://{u.hostname}:{u.port}"}
+    if u.username:
+        cfg["username"] = unquote(u.username)
+        cfg["password"] = unquote(u.password or "")
+    return cfg
 
 
 def body(p):
@@ -87,6 +110,7 @@ def click_at(cdp, x, y):
 
 
 def goto_retry(page, url, tries=4):
+    """home residential exits throw transient net::ERR_CONNECTION_CLOSED - just retry."""
     for i in range(tries):
         try:
             page.goto(url, wait_until="domcontentloaded", timeout=60000)
@@ -98,13 +122,45 @@ def goto_retry(page, url, tries=4):
 
 
 def balance(page):
-    m = re.search(r"(\d+) cloud tokens", body(page))
-    earned = re.findall(r"(\d+) of 25 earned today", body(page))
+    b = body(page)
+    m = re.search(r"(\d+) cloud tokens", b)
+    earned = re.findall(r"(\d+) of 25 earned today", b)
     return (int(m.group(1)) if m else None), earned
 
 
+def solve_turnstile(page, cdp, log):
+    """Click the checkbox; if that does not take, click the challenge iframe directly."""
+    for rnd in range(8):
+        r = page.evaluate(RECT_JS)
+        if not (r and r["w"] > 5):
+            log(f"  widget not rendered yet: {r}")
+            time.sleep(2)
+            continue
+        x, y = r["x"] + 28, r["y"] + r["h"] / 2
+        hit = page.evaluate(HIT_JS, [x, y])
+        log(f"  round {rnd}: rect={r} click {x:.0f},{y:.0f} top={hit}")
+        click_at(cdp, x, y)
+        for _ in range(8):
+            time.sleep(2)
+            if toklen(page) > 10:
+                log(f"  token len {toklen(page)}")
+                return True
+        if rnd == 2:
+            # coordinate clicks are not landing (something covers the checkbox):
+            # go through Playwright, which pierces the closed shadow root for us.
+            for fr in page.frames:
+                if "challenges.cloudflare.com" not in (fr.url or ""):
+                    continue
+                try:
+                    fr.frame_element().click(force=True, timeout=8000)
+                    log("  fallback: clicked challenge iframe element")
+                except Exception as e:
+                    log(f"  fallback click failed: {type(e).__name__}: {str(e)[:80]}")
+                break
+    return False
+
+
 def earn_one(ctx, page, log):
-    """Returns True if a token was credited."""
     if not goto_retry(page, PANEL):
         log("panel unreachable")
         return False
@@ -148,58 +204,19 @@ def earn_one(ctx, page, log):
     except Exception as e:
         log(f"  focus emulation failed: {type(e).__name__}")
     log(f"  hasFocus={page.evaluate('document.hasFocus()')}")
-    solved = False
-    for _ in range(6):
-        r = page.evaluate("""() => {const e=document.querySelector('.cf-turnstile,[data-sitekey]');
-            if(!e) return null; const b=e.getBoundingClientRect();
-            return {x:b.x,y:b.y,w:b.width,h:b.height};}""")
-        if r and r["w"] > 5:
-            log(f"  widget rect: {r} vp={page.viewport_size}")
-            for frac in (0.09, 0.5, 0.75):
-                x = r["x"] + r["w"] * frac
-                y = r["y"] + r["h"] / 2
-                top = page.evaluate(
-                    "([x,y]) => {const e=document.elementFromPoint(x,y);"
-                    " return e ? (e.tagName + '.' + String(e.className).slice(0,50)) : 'none';}", [x, y])
-                log(f"  click {x:.0f},{y:.0f} top={top}")
-                click_at(cdp, x, y)
-                for k in range(6):
-                    time.sleep(2)
-                    n = toklen(page)
-                    if n > 10:
-                        solved = True
-                        log(f"  token len {n} after {k * 2}s at frac={frac}")
-                        break
-                if solved:
-                    break
-        else:
-            log(f"  widget not rendered yet: {r} vp={page.viewport_size}")
-        for k in range(4):
-            if solved:
-                break
-            time.sleep(2)
-            n = toklen(page)
-            if n > 10:
-                solved = True
-                log(f"  token len {n} (late)")
-                break
-        if solved:
-            break
+
+    solved = solve_turnstile(page, cdp, log)
     log(f"turnstile: {'solved' if solved else 'FAILED'}")
     if not solved:
         try:
             page.screenshot(path=f"/tmp/vylo_turnstile_fail_{int(time.time())}.png", full_page=True)
             log(f"  url at fail: {page.url}")
             log(f"  text at fail: {body(page)[:160]}")
-            r = page.evaluate("""() => {const e=document.querySelector('.cf-turnstile,[data-sitekey]');
-                if(!e) return null; const b=e.getBoundingClientRect();
-                return {x:b.x,y:b.y,w:b.width,h:b.height,vis:getComputedStyle(e).visibility};}""")
-            log(f"  widget rect: {r} viewport={page.viewport_size}")
+            log(f"  frames at fail: {[f.url[:70] for f in page.frames]}")
         except Exception as e:
             log(f"  diag failed: {type(e).__name__}")
         return False
 
-    # walk the steps until it sends us back to the panel
     for i in range(22):
         txt = body(page)
         if "panel.switched.cloud" in page.url:
@@ -219,27 +236,13 @@ def earn_one(ctx, page, log):
     time.sleep(3)
     after, earn_after = balance(page)
     log(f"balance after: {after} {earn_after}")
-    ok = bool(after and before is not None and after > before)
-    return ok
-
-
-def proxy_cfg(url):
-    """socks5://user:pass@host:port -> Playwright proxy dict with credentials."""
-    if not url:
-        return None
-    from urllib.parse import urlparse, unquote
-    u = urlparse(url)
-    cfg = {"server": f"{u.scheme}://{u.hostname}:{u.port}"}
-    if u.username:
-        cfg["username"] = unquote(u.username)
-        cfg["password"] = unquote(u.password or "")
-    return cfg
+    return bool(after and before is not None and after > before)
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--count", type=int, default=25, help="how many tokens to farm")
-    ap.add_argument("--proxy", default=os.environ.get("SW_PROXY", "socks5://127.0.0.1:10807"))
+    ap.add_argument("--proxy", default=os.environ.get("SW_PROXY", "socks5://127.0.0.1:10804"))
     ap.add_argument("--max-fail", type=int, default=3, help="abort after N consecutive failures")
     ap.add_argument("--headless", action="store_true",
                     help="run headless (CI without xvfb); default is headed, which is what Turnstile likes")
@@ -252,9 +255,9 @@ def main():
     done = 0
     fails = 0
     with sync_playwright() as pw:
-        br = pw.chromium.launch(headless=args.headless, args=["--no-sandbox",
-                                                      "--disable-blink-features=AutomationControlled",
-                                                      "--disable-dev-shm-usage"])
+        br = pw.chromium.launch(headless=args.headless, args=[
+            "--no-sandbox", "--disable-blink-features=AutomationControlled",
+            "--disable-dev-shm-usage"])
         ctx = br.new_context(viewport={"width": 1366, "height": 900}, locale="en-US",
                              proxy=proxy_cfg(args.proxy))
         ctx.add_cookies(cookies)
