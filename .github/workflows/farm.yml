@@ -99,7 +99,9 @@ jobs:
           if-no-files-found: ignore
 
       - name: Spend tokens as runtime
-        if: ${{ github.event.inputs.spend == 'true' }}
+        # always(): 即使 Farm 失败(面板抽风/连续失败)，也把已有余额换成时长，别让保活断在这。
+        # 余额为 0 时 add_runtime.py 自己会安全跳过。
+        if: ${{ always() && github.event.inputs.spend == 'true' }}
         env:
           NOPROFIT_COOKIES: ${{ secrets.NOPROFIT_COOKIES }}
           INPUT_PROXY: ${{ github.event.inputs.proxy }}

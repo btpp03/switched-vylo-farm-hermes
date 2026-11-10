@@ -308,7 +308,10 @@ def main():
             log(f"SUMMARY: farmed {done} Cuty link(s), {fails} consecutive failure(s), "
                 f"final {st}")
             br.close()
-    return 0 if done else 1
+    # 正常收尾一律算成功：当天配额已满、刷 0 条、刷到 N 条，都是正常日。
+    # 只有「面板连不上」(上面直接 return 1) 或「连续失败到 max-fail」才算失败，
+    # 否则 GA 会标红并短路跳过后面的 spend 换时长步骤，保活反而断在这里。
+    return 1 if fails >= args.max_fail else 0
 
 
 if __name__ == "__main__":
