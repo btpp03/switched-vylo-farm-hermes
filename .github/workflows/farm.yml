@@ -1,17 +1,21 @@
 name: farm-cloud-tokens
 
-# Manual trigger only: farms switched.cloud Cloud Tokens through the Vylo route and
+# Manual trigger only: farms switched.cloud Cloud Tokens through the Cuty route and
 # optionally spends the whole balance as VPS runtime.
 #
-# vylo.cc refuses datacenter IPs, so a residential exit is required. Two ways:
-#   * secret PROXY        -> socks5://host:port or http://host:port (ready-made proxy)
-#   * secret SB_CONFIG    -> a sing-box config with local socks inbounds (10801-10808);
-#                            the job starts sing-box itself and uses socks5://127.0.0.1:10807
+# Panel v2.0 removed the old "Earn with Vylo" button. New automatable route is Cuty
+# (1 token/link, 2 links/day) + a daily streak that credits just for opening /tokens.
+# Linkvertise (1.5/link, 10/day) is intentionally NOT farmed: its free path needs
+# hcaptcha + a subscription wall, which a CI runner cannot pass safely.
+#
+# cuttty.com's Turnstile rejects datacenter IPs, so a residential exit is required:
+#   * secret HOME_VLESS_URL (preferred) or JP_SOCKS_URL -> local sing-box relay on 10900
+#   * secret PROXY          -> ready-made socks5:// or http:// proxy URL
 on:
   workflow_dispatch:
     inputs:
       count:
-        description: "how many tokens to farm (daily cap is 25)"
+        description: "max Cuty links to attempt (panel hard cap is 2/day; extra is ignored)"
         default: "25"
         required: true
       spend:
@@ -91,7 +95,7 @@ jobs:
           path: |
             farm.log
             sb.log
-            /tmp/vylo_turnstile_fail_*.png
+            /tmp/cuty_fail_*.png
           if-no-files-found: ignore
 
       - name: Spend tokens as runtime
@@ -101,5 +105,5 @@ jobs:
           INPUT_PROXY: ${{ github.event.inputs.proxy }}
           SECRET_PROXY: ${{ secrets.PROXY }}
         run: |
-          export SW_PROXY="${INPUT_PROXY:-${SECRET_PROXY:-socks5://127.0.0.1:10807}}"
+          export SW_PROXY="${INPUT_PROXY:-${SECRET_PROXY:-socks5://127.0.0.1:10900}}"
           xvfb-run -a python3 -u add_runtime.py --tokens 0

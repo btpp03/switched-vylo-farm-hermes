@@ -1,20 +1,23 @@
 #!/usr/bin/env python3
-"""Farm switched.cloud Cloud Tokens through the Vylo sponsored link, in CI or locally.
+"""Farm switched.cloud Cloud Tokens AFTER the v2.0 panel redesign (Vylo route removed).
 
-Flow (all inside one browser context):
-  1. open https://panel.switched.cloud/tokens with the stored session cookies
-  2. click "Earn with Vylo"      -> the panel asks Vylo for a fresh one-time link
-  3. follow that vylo.cc link    -> Turnstile checkbox sits in a closed shadow root, so the
-     only reliable way to click it is by coordinates taken from the `.cf-turnstile`
-     container rect (28px in from the left edge, vertically centred)
-  4. walk the Vylo steps: Continue -> timer -> Unlock -> Continue -> timer -> Unlock -> Get link
-  5. it redirects back to the panel and Vylo's postback credits 1 Cloud Token (= 2 days on a
-     Plus account; the panel counter counts *links*, not tokens)
+New panel (v2.0.2) earn routes:
+  * Daily streak  - no button: server credits 0.25 (->1 on day 7) just for opening /tokens.
+                    One claim/day, so a single daily visit is all this script needs for it.
+  * Cuty          - 1 Cloud Token / link, 2 links/day. This is the automatable route:
+      POST /tokens/earn (provider=cuty) -> 302 to cuty.io/<short>
+      -> cuttty.com: click "Continue" -> Cloudflare Turnstile checkbox
+      -> solve via CDP coordinate clicks (same shadow-root trick as the old Vylo script)
+      -> click "I am not a robot" -> "preparing" -> click the "Go ..." button
+      -> the page redirects back to panel.switched.cloud and the postback credits +1.
+  * Linkvertise   - 1.5/link, 10/day, but the free path hides behind hcaptcha + a
+                    subscription/3-ad wall. Not automatable on a datacenter runner; SKIPPED.
 
-Nothing here spends tokens — "Add runtime" is a separate script (add_runtime.py).
+A residential exit is still required: the Turnstile on cuttty.com rejects datacenter IPs
+exactly like Vylo did. Keep using secret HOME_VLESS_URL / the local sing-box relay.
 
 usage:
-  SW_PROXY=socks5://127.0.0.1:10804 xvfb-run -a python3 vylo_farm.py --count 25
+  SW_PROXY=socks5://127.0.0.1:10900 xvfb-run -a python3 vylo_farm.py --count 25
 env:
   NOPROFIT_COOKIES   base64 or raw JSON cookie list (CI); else ~/noprofit_cookies.json
 """
@@ -30,48 +33,34 @@ from playwright.sync_api import sync_playwright
 from panelcookies import load_cookies, save_cookies
 
 PANEL = os.environ.get("SW_PANEL", "https://panel.switched.cloud/tokens")
-
-CLICK_JS = r"""
-(txt) => {
-  const want = txt.toLowerCase().trim(); const cands = [];
-  for (const e of document.querySelectorAll('button,a,[role=button],div,span')) {
-    const r = e.getBoundingClientRect(); if (r.width < 2 || r.height < 2) continue;
-    const t = (e.innerText || '').trim().replace(/\s+/g, ' '); if (!t || t.length > 120) continue;
-    const lt = t.toLowerCase(); let score = 0;
-    if (lt === want) score = 3; else if (lt.startsWith(want)) score = 2; else if (lt.includes(want)) score = 1;
-    if (!score) continue;
-    cands.push({e, score, kids: e.querySelectorAll('*').length, area: r.width * r.height});
-  }
-  if (!cands.length) return null;
-  cands.sort((a, b) => b.score - a.score || a.kids - b.kids || a.area - b.area);
-  const el = cands[0].e; el.scrollIntoView({block:'center'}); el.click();
-  return (el.innerText||'').trim().replace(/\s+/g,' ').slice(0,40);
-}
-"""
-
-# step machine: buttons only, exact-ish text, so the "3 Get link" breadcrumb is never hit
-CLICK_BTN_JS = r"""
-(txt) => {
-  const want = txt.toLowerCase().trim();
-  for (const e of document.querySelectorAll('button,[role=button]')) {
-    const r = e.getBoundingClientRect();
-    if (r.width < 2 || r.height < 2 || e.disabled) continue;
-    const t = (e.innerText || '').trim().replace(/\s+/g, ' ').toLowerCase();
-    if (t === want || (t.length <= 25 && t.includes(want))) {
-      e.scrollIntoView({block: 'center'}); e.click();
-      return (e.innerText || '').trim().replace(/\s+/g, ' ').slice(0, 40);
-    }
-  }
-  return null;
-}
-"""
+# Daily hard caps enforced by the panel; --count only bounds how many we *attempt*.
+CUTY_CAP = 2
 
 RECT_JS = r"""() => {const e=document.querySelector('.cf-turnstile,[data-sitekey]');
     if(!e) return null; const b=e.getBoundingClientRect();
     return {x:b.x,y:b.y,w:b.width,h:b.height};}"""
-
 HIT_JS = """([x,y]) => {const e=document.elementFromPoint(x,y);
     return e ? (e.tagName + '.' + String(e.className).slice(0,40)) : 'none';}"""
+
+# Loose substring button clicker for the Cuty ad chain. Never touches paid paths.
+CLICK_BTN_JS = r"""(want) => {
+  const w = want.toLowerCase();
+  const BAD = /premium|trial|subscribe|charge|9\.99|59\.99|skip all ads|become a/i;
+  for (const e of document.querySelectorAll('button,[role=button],input[type=submit],a[href]')) {
+    const r = e.getBoundingClientRect();
+    if (r.width < 2 || r.height < 2 || e.disabled) continue;
+    const t = (e.innerText || e.value || '').trim().replace(/\s+/g,' ').toLowerCase();
+    if (!t || t.length > 40 || BAD.test(t)) continue;
+    if (t.includes(w)) {
+      e.scrollIntoView({block:'center'}); e.click();
+      return t.slice(0, 40);
+    }
+  }
+  return null;
+}"""
+
+ADVANCE_WORDS = ["go", "get link", "continue", "unlock", "next", "proceed",
+                 "click here", "visit", "i am not a robot", "verify", "submit"]
 
 
 def proxy_cfg(url):
@@ -96,7 +85,8 @@ def body(p):
 def toklen(p):
     try:
         return p.evaluate(
-            "()=>{const e=document.querySelector('[name=\"cf-turnstile-response\"]');return e?(e.value||'').length:-1}")
+            "()=>{const e=document.querySelector('[name=\"cf-turnstile-response\"]');"
+            "return e?(e.value||'').length:-1}")
     except Exception:
         return -1
 
@@ -121,18 +111,26 @@ def goto_retry(page, url, tries=4):
     return False
 
 
-def balance(page):
-    b = body(page)
-    m = re.search(r"(\d+) cloud tokens", b)
-    earned = re.findall(r"(\d+) of 25 earned today", b)
-    return (int(m.group(1)) if m else None), earned
+def read_state(page):
+    """Parse the v2 panel: integer balance, Cuty/Linkvertise daily usage, streak."""
+    t = body(page)
+    bal = re.search(r"(\d+) cloud tokens", t)
+    cuty = re.search(r"(\d+) of 2 today", t)
+    lv = re.search(r"(\d+) of 10 today", t)
+    claimed = "Claimed today" in t
+    return {
+        "bal": int(bal.group(1)) if bal else None,
+        "cuty": int(cuty.group(1)) if cuty else None,
+        "lv": int(lv.group(1)) if lv else None,
+        "claimed": claimed,
+    }
 
 
 def solve_turnstile(page, cdp, log):
     """Click the checkbox; if that does not take, click the challenge iframe directly."""
     for rnd in range(8):
         r = page.evaluate(RECT_JS)
-        if not (r and r["w"] > 5):
+        if not (r and r["w"] > 5 and r["h"] > 5):
             log(f"  widget not rendered yet: {r}")
             time.sleep(2)
             continue
@@ -146,8 +144,6 @@ def solve_turnstile(page, cdp, log):
                 log(f"  token len {toklen(page)}")
                 return True
         if rnd == 2:
-            # coordinate clicks are not landing (something covers the checkbox):
-            # go through Playwright, which pierces the closed shadow root for us.
             for fr in page.frames:
                 if "challenges.cloudflare.com" not in (fr.url or ""):
                     continue
@@ -160,92 +156,98 @@ def solve_turnstile(page, cdp, log):
     return False
 
 
-def earn_one(ctx, page, log):
-    if not goto_retry(page, PANEL):
-        log("panel unreachable")
+def earn_cuty(ctx, panel_page, log):
+    """Complete ONE Cuty sponsored link. Returns True if the panel credits it."""
+    # 1. get a fresh short link from the panel (POST /tokens/earn)
+    form = panel_page.evaluate("""()=>{
+      const f=[...document.querySelectorAll('form')].find(x=>/tokens\\/earn/.test(x.action));
+      if(!f) return null;
+      const g=n=>f.querySelector(`input[name=${n}]`)?.value;
+      return {action:f.action, token:g('_token')};
+    }""")
+    if not form or not form.get("token"):
+        log("  no /tokens/earn form (quota exhausted / markup changed?)")
         return False
-    time.sleep(3)
-    before, earn_before = balance(page)
-    log(f"balance before: {before} {earn_before}")
-
-    seen = []
-    page.on("request", lambda r: seen.append(r.url))
-    vurl = None
-    for _ in range(3):
-        page.evaluate(CLICK_JS, "Earn with Vylo")
-        for _ in range(8):
-            time.sleep(2)
-            for u in seen:
-                if "/static/" in u:
-                    continue
-                m = re.search(r"(https://vylo\.cc/[A-Za-z0-9]{4,})", u)
-                if m:
-                    vurl = m.group(1)
-                    break
-            if vurl:
-                break
-        if vurl:
-            break
-    if not vurl:
-        log("no vylo link (panel refused / rate-limited?)")
-        return False
-    log(f"vylo link: {vurl}")
-
-    if not goto_retry(page, vurl):
-        log("vylo page unreachable")
-        return False
-    time.sleep(5)
-
-    cdp = ctx.new_cdp_session(page)
-    # CI runners have no window manager, so the page is never "focused" and Cloudflare
-    # ignores synthetic clicks. Force the focus flag before touching the widget.
     try:
-        cdp.send("Emulation.setFocusEmulationEnabled", {"enabled": True})
+        r = ctx.request.post(form["action"],
+                             form={"_token": form["token"], "provider": "cuty"},
+                             max_redirects=0, timeout=30000)
+        cu = r.headers.get("location")
     except Exception as e:
-        log(f"  focus emulation failed: {type(e).__name__}")
-    log(f"  hasFocus={page.evaluate('document.hasFocus()')}")
-
-    solved = solve_turnstile(page, cdp, log)
-    log(f"turnstile: {'solved' if solved else 'FAILED'}")
-    if not solved:
-        try:
-            page.screenshot(path=f"/tmp/vylo_turnstile_fail_{int(time.time())}.png", full_page=True)
-            log(f"  url at fail: {page.url}")
-            log(f"  text at fail: {body(page)[:160]}")
-            log(f"  frames at fail: {[f.url[:70] for f in page.frames]}")
-        except Exception as e:
-            log(f"  diag failed: {type(e).__name__}")
+        log(f"  earn POST failed: {type(e).__name__}: {str(e)[:100]}")
         return False
+    if not cu or "cuty" not in cu:
+        log(f"  unexpected earn redirect: {cu}")
+        return False
+    log(f"  cuty link: {cu}")
 
-    for i in range(22):
-        txt = body(page)
-        if "panel.switched.cloud" in page.url:
-            log("back on panel")
-            break
-        clicked = None
-        for lbl in ["Continue", "Unlock", "Get link", "Skip", "Next"]:
-            clicked = page.evaluate(CLICK_BTN_JS, lbl)
-            if clicked:
+    # 2. walk the cutty.com chain in its own page (panel page stays for verification)
+    q = ctx.new_page()
+    try:
+        if not goto_retry(q, cu):
+            log("  cutty page unreachable")
+            return False
+        time.sleep(5)
+        cdp = ctx.new_cdp_session(q)
+        try:
+            cdp.send("Emulation.setFocusEmulationEnabled", {"enabled": True})
+        except Exception:
+            pass
+
+        # step A: first "Continue" -> captcha page
+        q.evaluate("""()=>{const b=document.getElementById('submit-button')||
+            [...document.querySelectorAll('button')].find(x=>/continue/i.test(x.innerText||''));
+            if(b)b.click()}""")
+        time.sleep(6)
+
+        # step B: solve the Cloudflare Turnstile checkbox
+        if not solve_turnstile(q, cdp, log):
+            log("  turnstile: FAILED")
+            try:
+                q.screenshot(path=f"/tmp/cuty_fail_{int(time.time())}.png", full_page=True)
+            except Exception:
+                pass
+            return False
+        log("  turnstile: solved")
+
+        # step C: submit + advance through "preparing" until it redirects back to the panel
+        for i in range(20):
+            if "panel.switched.cloud" in q.url:
+                log("  back on panel")
                 break
-        if i % 4 == 0:
-            log(f"  step{i}: {page.url.split('/')[-1][:18]} :: {txt[:70]}")
-        time.sleep(4)
+            txt = body(q)
+            # re-solve a fresh turnstile if the ad chain raises another one
+            if q.evaluate("!!document.querySelector('.cf-turnstile,[data-sitekey]')") \
+                    and toklen(q) < 10 and i % 4 == 0:
+                solve_turnstile(q, cdp, log)
+            for w in ADVANCE_WORDS:
+                hit = q.evaluate(CLICK_BTN_JS, w)
+                if hit:
+                    if i % 2 == 0:
+                        log(f"  step{i}: clicked '{hit}'")
+                    break
+            if i % 4 == 0:
+                log(f"  step{i}: {q.url.split('/')[-1][:20]} :: {txt[:60]}")
+            time.sleep(4)
 
-    time.sleep(3)
-    goto_retry(page, PANEL)
-    time.sleep(3)
-    after, earn_after = balance(page)
-    log(f"balance after: {after} {earn_after}")
-    return bool(after and before is not None and after > before)
+        back = "panel.switched.cloud" in q.url
+        log(f"  {'redirected back' if back else 'NO redirect'} (last url {q.url[:70]})")
+        return back
+    finally:
+        try:
+            q.close()
+        except Exception:
+            pass
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--count", type=int, default=25, help="how many tokens to farm")
-    ap.add_argument("--proxy", default=os.environ.get("SW_PROXY", "socks5://127.0.0.1:10804"))
+    ap.add_argument("--count", type=int, default=25,
+                    help="max Cuty links to attempt (hard panel cap is 2/day)")
+    ap.add_argument("--proxy", default=os.environ.get("SW_PROXY", "socks5://127.0.0.1:10900"))
     ap.add_argument("--max-fail", type=int, default=3, help="abort after N consecutive failures")
     ap.add_argument("--headless", action="store_true",
-                    help="run headless (CI without xvfb); default is headed, which is what Turnstile likes")
+                    help="run headless; default is headed (xvfb), which Turnstile likes")
     args = ap.parse_args()
 
     def log(msg):
@@ -254,6 +256,7 @@ def main():
     cookies = load_cookies()
     done = 0
     fails = 0
+    st = {}
     with sync_playwright() as pw:
         br = pw.chromium.launch(headless=args.headless, args=[
             "--no-sandbox", "--disable-blink-features=AutomationControlled",
@@ -263,14 +266,38 @@ def main():
         ctx.add_cookies(cookies)
         page = ctx.new_page()
         try:
-            while done < args.count and fails < args.max_fail:
-                log(f"--- token {done + 1}/{args.count} (fails={fails}) ---")
+            log("open panel (also claims the daily streak)")
+            if not goto_retry(page, PANEL):
+                log("panel unreachable")
+                return 1
+            time.sleep(4)
+            st = read_state(page)
+            log(f"state: {st}")
+
+            # how many Cuty links are still available today
+            remaining = CUTY_CAP - (st["cuty"] if st["cuty"] is not None else CUTY_CAP)
+            if remaining <= 0:
+                log("Cuty daily cap already used (2/2) - nothing to farm")
+            target = min(args.count, remaining)
+            log(f"will attempt up to {target} Cuty link(s)")
+
+            while done < target and fails < args.max_fail:
+                log(f"--- cuty {done + 1}/{target} (fails={fails}) ---")
                 try:
-                    ok = earn_one(ctx, page, log)
+                    ok = earn_cuty(ctx, page, log)
                 except Exception as e:
                     log(f"error: {type(e).__name__}: {str(e)[:120]}")
                     ok = False
-                if ok:
+                # refresh panel to read the authoritative quota/balance
+                goto_retry(page, PANEL)
+                time.sleep(3)
+                after = read_state(page)
+                credited = (after["cuty"] is not None and st["cuty"] is not None
+                            and after["cuty"] > st["cuty"])
+                log(f"  quota {st['cuty']}->{after['cuty']} balance {st['bal']}->{after['bal']} "
+                    f"credited={credited}")
+                st = after
+                if ok and credited:
                     done += 1
                     fails = 0
                 else:
@@ -278,7 +305,8 @@ def main():
                     time.sleep(8)
                 save_cookies(ctx.cookies())
         finally:
-            log(f"SUMMARY: farmed {done} token(s), {fails} consecutive failure(s)")
+            log(f"SUMMARY: farmed {done} Cuty link(s), {fails} consecutive failure(s), "
+                f"final {st}")
             br.close()
     return 0 if done else 1
 
