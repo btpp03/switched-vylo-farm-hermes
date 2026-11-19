@@ -39,11 +39,12 @@ CUTY_CAP = 2
 RECT_JS = r"""() => {const e=document.querySelector('.cf-turnstile,[data-sitekey]');
     if(!e) return null; const b=e.getBoundingClientRect();
     return {x:b.x,y:b.y,w:b.width,h:b.height};}"""
-# AdFoc.us renders Turnstile into a plain container (#w), so fall back to its iframe/box.
+# AdFoc.us renders Turnstile into a plain container (#w); accept it at any size so we
+# still log/inspect the page when the widget has not laid out yet.
 ADFOC_RECT_JS = r"""() => {for (const s of ['.cf-turnstile','[data-sitekey]','#w iframe','#w']) {
     const e=document.querySelector(s); if(!e) continue;
-    const b=e.getBoundingClientRect(); if(b.width>5 && b.height>5)
-      return {x:b.x,y:b.y,w:b.width,h:b.height,sel:s};}
+    const b=e.getBoundingClientRect();
+    return {x:b.x,y:b.y,w:b.width,h:b.height,sel:s};}
     return null;}"""
 HIT_JS = """([x,y]) => {const e=document.elementFromPoint(x,y);
     return e ? (e.tagName + '.' + String(e.className).slice(0,40)) : 'none';}"""
@@ -276,6 +277,10 @@ def earn_adfocus(ctx, panel_page, log):
 
     q = ctx.new_page()
     try:
+        try:
+            q.set_extra_http_headers({"Referer": "https://panel.switched.cloud/tokens"})
+        except Exception:
+            pass
         if not goto_retry(q, link):
             log("  adfoc page unreachable")
             return False
@@ -291,13 +296,18 @@ def earn_adfocus(ctx, panel_page, log):
         solved = False
         for rnd in range(8):
             rr = q.evaluate(ADFOC_RECT_JS)
-            if not rr:
-                log(f"  widget not rendered yet: {rr}")
+            info = q.evaluate("""()=>{const w=document.getElementById('w');
+              const r=w?w.getBoundingClientRect():null;
+              return {url:location.href, w:r?[Math.round(r.width),Math.round(r.height)]:null,
+                      ifr:document.querySelectorAll('iframe').length, ts:typeof window.turnstile,
+                      txt:document.body.innerText.slice(0,70)};}""")
+            log(f"  round {rnd}: {info} rect={rr}")
+            if not rr or rr["w"] < 5 or rr["h"] < 5:
                 time.sleep(2)
                 continue
             x, y = rr["x"] + 28, rr["y"] + rr["h"] / 2
             hit = q.evaluate(HIT_JS, [x, y])
-            log(f"  round {rnd}: rect={rr} click {x:.0f},{y:.0f} top={hit}")
+            log(f"  click {x:.0f},{y:.0f} top={hit}")
             click_at(cdp, x, y)
             for _ in range(8):
                 time.sleep(2)
