@@ -274,6 +274,27 @@ def main():
             st = read_state(page)
             log(f"state: {st}")
 
+            # v2.0.4: the daily streak now waits behind a "Claim" button instead of
+            # auto-crediting on page open, so opening /tokens alone stopped working.
+            if not st.get("claimed"):
+                clicked = page.evaluate("""()=>{
+                  const b=[...document.querySelectorAll('button')]
+                    .find(x=>/^Claim/i.test(x.innerText.trim()));
+                  if(!b||b.disabled) return false;
+                  b.click();
+                  return true;
+                }""")
+                if clicked:
+                    time.sleep(4)
+                    goto_retry(page, PANEL)
+                    time.sleep(2)
+                    st = read_state(page)
+                    log(f"streak claim clicked; state now: {st}")
+                else:
+                    log("no Claim button (already claimed or markup changed)")
+            else:
+                log("streak already claimed today")
+
             # how many Cuty links are still available today
             remaining = CUTY_CAP - (st["cuty"] if st["cuty"] is not None else CUTY_CAP)
             if remaining <= 0:
