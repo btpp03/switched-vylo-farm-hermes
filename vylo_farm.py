@@ -293,59 +293,31 @@ def earn_adfocus(ctx, panel_page, log):
 
         # adfoc.us serves a "Quick check" page that renders Turnstile into #w and
         # auto-submits /serve/nx/test/human once the token lands.
-        solved = False
-        for rnd in range(8):
-            rr = q.evaluate(ADFOC_RECT_JS)
-            info = q.evaluate("""()=>{const w=document.getElementById('w');
-              const r=w?w.getBoundingClientRect():null;
-              return {url:location.href, w:r?[Math.round(r.width),Math.round(r.height)]:null,
-                      ifr:document.querySelectorAll('iframe').length, ts:typeof window.turnstile,
-                      txt:document.body.innerText.slice(0,70)};}""")
-            log(f"  round {rnd}: {info} rect={rr}")
-            if not rr or rr["w"] < 5 or rr["h"] < 5:
-                time.sleep(2)
-                continue
-            x, y = rr["x"] + 28, rr["y"] + rr["h"] / 2
-            hit = q.evaluate(HIT_JS, [x, y])
-            log(f"  click {x:.0f},{y:.0f} top={hit}")
-            click_at(cdp, x, y)
-            for _ in range(8):
-                time.sleep(2)
-                if toklen(q) > 10:
-                    log(f"  token len {toklen(q)}")
-                    solved = True
-                    break
-            if solved:
-                break
-        if not solved:
-            log("  turnstile: FAILED")
-            try:
-                q.screenshot(path=f"/tmp/adfoc_fail_{int(time.time())}.png", full_page=True)
-            except Exception:
-                pass
-            return False
-        log("  turnstile: solved")
-
-        # walk the remainder of the ad chain until it sends us back to the panel
-        for i in range(25):
+        # adfoc serves different variants: a Turnstile "Quick check" on flagged/datacenter
+        # exits, and a plain ad page on trusted residential exits. Handle both — solve the
+        # widget when present, otherwise walk the ad page with the generic clicker.
+        for i in range(30):
             if "panel.switched.cloud" in q.url:
                 log("  back on panel")
                 break
+            rr = q.evaluate(ADFOC_RECT_JS)
+            ts = q.evaluate("typeof window.turnstile")
+            if rr and rr["w"] > 5 and rr["h"] > 5 and ts == "object" and toklen(q) < 10:
+                x, y = rr["x"] + 28, rr["y"] + rr["h"] / 2
+                hit = q.evaluate(HIT_JS, [x, y])
+                log(f"  step{i}: turnstile click {x:.0f},{y:.0f} top={hit} rect={rr}")
+                click_at(cdp, x, y)
             txt = body(q)
-            if q.evaluate("!!document.querySelector('.cf-turnstile,[data-sitekey]')") \
-                    and toklen(q) < 10 and i % 4 == 0:
-                rr = q.evaluate(ADFOC_RECT_JS)
-                if rr:
-                    click_at(cdp, rr["x"] + 28, rr["y"] + rr["h"] / 2)
             for w in ADVANCE_WORDS:
                 hit = q.evaluate(CLICK_BTN_JS, w)
                 if hit:
-                    if i % 2 == 0:
-                        log(f"  step{i}: clicked '{hit}'")
+                    log(f"  step{i}: clicked '{hit}'")
                     break
-            if i % 4 == 0:
-                log(f"  step{i}: {q.url.split('/')[-1][:24]} :: {txt[:60]}")
-            time.sleep(4)
+            if i == 0:
+                log(f"  body0: {txt[:300]}")
+            elif i % 2 == 0:
+                log(f"  step{i}: {q.url.split('/')[-1][:24]} :: {txt[:70]}")
+            time.sleep(3)
 
         back = "panel.switched.cloud" in q.url
         log(f"  {'redirected back' if back else 'NO redirect'} (last url {q.url[:70]})")
