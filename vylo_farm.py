@@ -39,6 +39,12 @@ CUTY_CAP = 2
 RECT_JS = r"""() => {const e=document.querySelector('.cf-turnstile,[data-sitekey]');
     if(!e) return null; const b=e.getBoundingClientRect();
     return {x:b.x,y:b.y,w:b.width,h:b.height};}"""
+# AdFoc.us renders Turnstile into a plain container (#w), so fall back to its iframe/box.
+ADFOC_RECT_JS = r"""() => {for (const s of ['.cf-turnstile','[data-sitekey]','#w iframe','#w']) {
+    const e=document.querySelector(s); if(!e) continue;
+    const b=e.getBoundingClientRect(); if(b.width>5 && b.height>5)
+      return {x:b.x,y:b.y,w:b.width,h:b.height,sel:s};}
+    return null;}"""
 HIT_JS = """([x,y]) => {const e=document.elementFromPoint(x,y);
     return e ? (e.tagName + '.' + String(e.className).slice(0,40)) : 'none';}"""
 
@@ -112,16 +118,18 @@ def goto_retry(page, url, tries=4):
 
 
 def read_state(page):
-    """Parse the v2 panel: integer balance, Cuty/Linkvertise daily usage, streak."""
+    """Parse the v2 panel: integer balance, Cuty/Linkvertise/AdFoc daily usage, streak."""
     t = body(page)
     bal = re.search(r"(\d+) cloud tokens", t)
     cuty = re.search(r"(\d+) of 2 today", t)
     lv = re.search(r"(\d+) of 10 today", t)
+    ad = re.search(r"(\d+) of 4 today", t)
     claimed = "Claimed today" in t
     return {
         "bal": int(bal.group(1)) if bal else None,
         "cuty": int(cuty.group(1)) if cuty else None,
         "lv": int(lv.group(1)) if lv else None,
+        "adfoc": int(ad.group(1)) if ad else None,
         "claimed": claimed,
     }
 
@@ -240,10 +248,111 @@ def earn_cuty(ctx, panel_page, log):
             pass
 
 
+def earn_adfocus(ctx, panel_page, log):
+    """Complete ONE AdFoc.us sponsored link. Same Cloudflare Turnstile gate as Cuty.
+    Returns True if the ad chain redirected back to the panel (caller verifies the quota)."""
+    form = panel_page.evaluate("""()=>{
+      const fs=[...document.querySelectorAll('form')].filter(x=>/tokens\\/earn/.test(x.action));
+      const f=fs.find(x=>x.querySelector('input[name=provider]')?.value==='adfocus');
+      if(!f) return null;
+      const g=n=>f.querySelector(`input[name=${n}]`)?.value;
+      return {action:f.action, token:g('_token')};
+    }""")
+    if not form or not form.get("token"):
+        log("  no adfocus /tokens/earn form (quota exhausted / markup changed?)")
+        return False
+    try:
+        r = ctx.request.post(form["action"],
+                             form={"_token": form["token"], "provider": "adfocus"},
+                             max_redirects=0, timeout=30000)
+        link = r.headers.get("location")
+    except Exception as e:
+        log(f"  adfocus earn POST failed: {type(e).__name__}: {str(e)[:100]}")
+        return False
+    if not link or "adfoc" not in link:
+        log(f"  unexpected adfocus redirect: {link}")
+        return False
+    log(f"  adfocus link: {link}")
+
+    q = ctx.new_page()
+    try:
+        if not goto_retry(q, link):
+            log("  adfoc page unreachable")
+            return False
+        time.sleep(4)
+        cdp = ctx.new_cdp_session(q)
+        try:
+            cdp.send("Emulation.setFocusEmulationEnabled", {"enabled": True})
+        except Exception:
+            pass
+
+        # adfoc.us serves a "Quick check" page that renders Turnstile into #w and
+        # auto-submits /serve/nx/test/human once the token lands.
+        solved = False
+        for rnd in range(8):
+            rr = q.evaluate(ADFOC_RECT_JS)
+            if not rr:
+                log(f"  widget not rendered yet: {rr}")
+                time.sleep(2)
+                continue
+            x, y = rr["x"] + 28, rr["y"] + rr["h"] / 2
+            hit = q.evaluate(HIT_JS, [x, y])
+            log(f"  round {rnd}: rect={rr} click {x:.0f},{y:.0f} top={hit}")
+            click_at(cdp, x, y)
+            for _ in range(8):
+                time.sleep(2)
+                if toklen(q) > 10:
+                    log(f"  token len {toklen(q)}")
+                    solved = True
+                    break
+            if solved:
+                break
+        if not solved:
+            log("  turnstile: FAILED")
+            try:
+                q.screenshot(path=f"/tmp/adfoc_fail_{int(time.time())}.png", full_page=True)
+            except Exception:
+                pass
+            return False
+        log("  turnstile: solved")
+
+        # walk the remainder of the ad chain until it sends us back to the panel
+        for i in range(25):
+            if "panel.switched.cloud" in q.url:
+                log("  back on panel")
+                break
+            txt = body(q)
+            if q.evaluate("!!document.querySelector('.cf-turnstile,[data-sitekey]')") \
+                    and toklen(q) < 10 and i % 4 == 0:
+                rr = q.evaluate(ADFOC_RECT_JS)
+                if rr:
+                    click_at(cdp, rr["x"] + 28, rr["y"] + rr["h"] / 2)
+            for w in ADVANCE_WORDS:
+                hit = q.evaluate(CLICK_BTN_JS, w)
+                if hit:
+                    if i % 2 == 0:
+                        log(f"  step{i}: clicked '{hit}'")
+                    break
+            if i % 4 == 0:
+                log(f"  step{i}: {q.url.split('/')[-1][:24]} :: {txt[:60]}")
+            time.sleep(4)
+
+        back = "panel.switched.cloud" in q.url
+        log(f"  {'redirected back' if back else 'NO redirect'} (last url {q.url[:70]})")
+        return back
+    finally:
+        try:
+            q.close()
+        except Exception:
+            pass
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--count", type=int, default=25,
                     help="max Cuty links to attempt (hard panel cap is 2/day)")
+    ap.add_argument("--adfoc", type=int, default=4,
+                    help="max AdFoc.us links to attempt (hard panel cap is 4/day)")
     ap.add_argument("--proxy", default=os.environ.get("SW_PROXY", "socks5://127.0.0.1:10900"))
     ap.add_argument("--max-fail", type=int, default=3, help="abort after N consecutive failures")
     ap.add_argument("--headless", action="store_true",
@@ -256,6 +365,8 @@ def main():
     cookies = load_cookies()
     done = 0
     fails = 0
+    ad_done = 0
+    ad_fails = 0
     st = {}
     with sync_playwright() as pw:
         br = pw.chromium.launch(headless=args.headless, args=[
@@ -325,9 +436,39 @@ def main():
                     fails += 1
                     time.sleep(8)
                 save_cookies(ctx.cookies())
+
+            # ---- AdFoc.us (1 token/link, 4/day) ----
+            st = read_state(page)
+            ad_used = st["adfoc"] if st["adfoc"] is not None else 4
+            ad_target = min(args.adfoc, max(0, 4 - ad_used))
+            log(f"AdFoc.us: {ad_used}/4 used today, will attempt {ad_target}")
+            ad_done = 0
+            ad_fails = 0
+            while ad_done < ad_target and ad_fails < args.max_fail:
+                log(f"--- adfoc {ad_done + 1}/{ad_target} (fails={ad_fails}) ---")
+                try:
+                    ok = earn_adfocus(ctx, page, log)
+                except Exception as e:
+                    log(f"error: {type(e).__name__}: {str(e)[:120]}")
+                    ok = False
+                goto_retry(page, PANEL)
+                time.sleep(3)
+                after = read_state(page)
+                credited = (after["adfoc"] is not None and st["adfoc"] is not None
+                            and after["adfoc"] > st["adfoc"])
+                log(f"  adfoc quota {st['adfoc']}->{after['adfoc']} balance {st['bal']}->{after['bal']} "
+                    f"credited={credited}")
+                st = after
+                if ok and credited:
+                    ad_done += 1
+                    ad_fails = 0
+                else:
+                    ad_fails += 1
+                    time.sleep(8)
+                save_cookies(ctx.cookies())
         finally:
-            log(f"SUMMARY: farmed {done} Cuty link(s), {fails} consecutive failure(s), "
-                f"final {st}")
+            log(f"SUMMARY: farmed {done} Cuty link(s), {ad_done} AdFoc.us link(s), "
+                f"{fails} Cuty / {ad_fails} AdFoc consecutive failure(s), final {st}")
             br.close()
     # 正常收尾一律算成功：当天配额已满、刷 0 条、刷到 N 条，都是正常日。
     # 只有「面板连不上」(上面直接 return 1) 或「连续失败到 max-fail」才算失败，

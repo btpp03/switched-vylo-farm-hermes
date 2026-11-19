@@ -14,6 +14,7 @@
 | 通道 | 收益 | 上限 | 脚本 | 原因 |
 | --- | --- | --- | --- | --- |
 | **Cuty** | 1 token/条 | 2 条/天 | ✅ 自动刷 | 走 `cuttty.com`，验证码是 Cloudflare Turnstile，旧脚本的坐标点击逻辑可直接复用，实测能到账 |
+| **AdFoc.us** | 1 token/条 | 4 条/天 | ✅ 自动刷 | 走 `adfoc.us`，同样是 Turnstile（sitekey `0x4AAAAAADHLtrWdn0NIFeo0`），复用同一套点击器；机房 IP 过不了，必须住宅出口 |
 | **每日签到** | 0.25→1 token/天 | 1 次/天 | ✅ 顺带完成 | v2.0.4 起因面板改版**需要点 Claim 按钮**（旧版是打开页面自动发）；脚本已处理，GA 每天跑一次就必得 |
 | **Linkvertise** | 1.5 token/条 | 10 条/天 | ❌ 不做 | 免费路径要「看 3 个广告 + hcaptcha + 订阅/试用诱导页」，机房 runner 过不了，且绝不能误点付费项 |
 
