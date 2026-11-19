@@ -67,7 +67,8 @@ CLICK_BTN_JS = r"""(want) => {
 }"""
 
 ADVANCE_WORDS = ["go", "get link", "continue", "unlock", "next", "proceed",
-                 "click here", "visit", "i am not a robot", "verify", "submit"]
+                 "click here", "visit", "i am not a robot", "verify", "submit",
+                 "skip", "close", "download", "watch"]
 
 
 def proxy_cfg(url):
@@ -317,6 +318,11 @@ def earn_adfocus(ctx, panel_page, log):
                 log(f"  body0: {txt[:300]}")
             elif i % 2 == 0:
                 log(f"  step{i}: {q.url.split('/')[-1][:24]} :: {txt[:70]}")
+            if i in (0, 4):
+                try:
+                    log("  dom: " + str(q.evaluate("""()=>[...document.querySelectorAll('a,button,[role=button],input[type=submit]')].map(e=>({t:(e.innerText||e.value||'').trim().replace(/\\s+/g,' ').slice(0,30),tag:e.tagName,h:(e.getAttribute('href')||'').slice(0,40),dis:!!e.disabled})).filter(x=>x.t).slice(0,15)""")))
+                except Exception as e:
+                    log(f"  dom err {e}")
             time.sleep(3)
 
         back = "panel.switched.cloud" in q.url

@@ -18,6 +18,10 @@ on:
         description: "max Cuty links to attempt (panel hard cap is 2/day; extra is ignored)"
         default: "25"
         required: true
+      adfoc:
+        description: "max AdFoc.us links to attempt (panel hard cap is 4/day)"
+        default: "4"
+        required: false
       spend:
         description: "spend all tokens as runtime afterwards (默认不换，token 留在余额里)"
         type: boolean
@@ -80,11 +84,12 @@ jobs:
           INPUT_PROXY: ${{ github.event.inputs.proxy }}
           SECRET_PROXY: ${{ secrets.PROXY }}
           COUNT: ${{ github.event.inputs.count }}
+          ADFOC: ${{ github.event.inputs.adfoc }}
         run: |
           set -o pipefail
           export SW_PROXY="${INPUT_PROXY:-${SECRET_PROXY:-socks5://127.0.0.1:10900}}"
           echo "proxy: ${SW_PROXY%%@*}"
-          xvfb-run -a -s "-screen 0 1400x1000x24" python3 -u vylo_farm.py --count "$COUNT" 2>&1 | tee farm.log
+          xvfb-run -a -s "-screen 0 1400x1000x24" python3 -u vylo_farm.py --count "$COUNT" --adfoc "${ADFOC:-4}" 2>&1 | tee farm.log
           grep SUMMARY farm.log || true
 
       - name: Upload logs on failure
